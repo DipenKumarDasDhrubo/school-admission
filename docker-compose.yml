@@ -41,5 +41,25 @@ services:
       db:
         condition: service_healthy
 
+  frontend:
+    build:
+      context: ./frontend
+      target: final
+    environment:
+      # URL the *browser* uses to reach the backend.
+      API_URL: "${API_URL:-http://localhost:8080}"
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # Run with: docker compose --profile test run --rm frontend-tests
+  frontend-tests:
+    profiles: ["test"]
+    build:
+      context: ./frontend
+      target: test
+
 volumes:
   pgdata:
