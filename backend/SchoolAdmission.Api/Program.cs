@@ -95,6 +95,21 @@ app.MapPost("/classes/{classId:guid}/holds", async (Guid classId, HttpRequest re
     return Results.Created($"/holds/{hold.HoldId}", hold);
 });
 
+app.MapGet("/holds/{holdId:guid}", async (Guid holdId, Store store) =>
+    Results.Ok(await store.GetHoldAsync(holdId)));
+
+app.MapPost("/holds/{holdId:guid}/confirm", async (Guid holdId, HttpRequest req, Store store) =>
+    Results.Ok(await store.ConfirmHoldAsync(holdId, RequireStudent(req))));
+
+app.MapDelete("/holds/{holdId:guid}", async (Guid holdId, HttpRequest req, Store store) =>
+{
+    await store.CancelHoldAsync(holdId, RequireStudent(req));
+    return Results.NoContent();
+});
+
+app.MapGet("/me/holds", async (HttpRequest req, Store store) =>
+    Results.Ok(await store.ListMyHoldsAsync(RequireStudent(req))));
+
 app.Run();
 
 public partial class Program { }

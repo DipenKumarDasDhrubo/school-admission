@@ -163,4 +163,98 @@ public sealed class Store(NpgsqlDataSource ds, IConfiguration config, ILogger<St
                 "You already have an active application or confirmed admission in this class.");
         }
     }
+
+    // Reported status: a HELD hold whose time has run out is EXPIRED, even if no job has flipped it yet.
+    private const string DerivedStatus =
+        "CASE WHEN h.status = 'HELD' AND h.expires_at <= clock_timestamp() THEN 'EXPIRED' ELSE h.status END";
+
+    public async Task<HoldStatusDto> GetHoldAsync(Guid holdId)
+    {
+        await using var conn = await ds.OpenConnectionAsync();
+        await using var cmd = Cmd(conn, null,
+            $"SELECT h.id, h.class_id, h.student_id, {DerivedStatus}, h.expires_at FROM holds h WHERE h.id = @id",
+            ("id", holdId));
+        await using var r = await cmd.ExecuteReaderAsync();
+        if (!await r.ReadAsync()) throw new ApiException(404, "HOLD_NOT_FOUND", "This application does not exist.");
+        return new HoldStatusDto(r.GetGuid(0), r.GetGuid(1), r.GetString(2), r.GetString(3), r.GetFieldValue<DateTime>(4));
+    }
+
+    public async Task<List<MyHoldDto>> ListMyHoldsAsync(string studentId)
+    {
+        await using var conn = await ds.OpenConnectionAsync();
+        await using var cmd = Cmd(conn, null, $"""
+            SELECT h.id, h.class_id, c.name, {DerivedStatus}, h.expires_at
+            FROM holds h JOIN classes c ON c.id = h.class_id
+            WHERE h.student_id = @s
+            ORDER BY h.created_at DESC, h.id
+            """, ("s", studentId));
+        await using var r = await cmd.ExecuteReaderAsync();
+        var list = new List<MyHoldDto>();
+        while (await r.ReadAsync())
+            list.Add(new MyHoldDto(r.GetGuid(0), r.GetGuid(1), r.GetString(2), r.GetString(3), r.GetFieldValue<DateTime>(4)));
+        return list;
+    }
+
+    private sealed record HoldRow(string StudentId, string Status, bool Expired);
+
+    /// <summary>Locks the hold row so confirm/cancel calls on the same hold are serialized.</summary>
+    private static async Task<HoldRow> LockHold(NpgsqlConnection conn, NpgsqlTransaction tx, Guid holdId, string studentId)
+    {
+        await using var cmd = Cmd(conn, tx,
+            "SELECT student_id, status, expires_at <= clock_timestamp() FROM holds WHERE id = @id FOR UPDATE",
+            ("id", holdId));
+        await using var r = await cmd.ExecuteReaderAsync();
+        if (!await r.ReadAsync()) throw new ApiException(404, "HOLD_NOT_FOUND", "This application does not exist.");
+        var row = new HoldRow(r.GetString(0), r.GetString(1), r.GetBoolean(2));
+        if (row.StudentId != studentId)
+            throw new ApiException(403, "NOT_YOUR_APPLICATION", "This application belongs to a different student.");
+        return row;
+    }
+
+    /// <summary>Confirms payment. Idempotent: confirming an already confirmed hold succeeds without changes.</summary>
+    public async Task<HoldConfirmedDto> ConfirmHoldAsync(Guid holdId, string studentId)
+    {
+        await using var conn = await ds.OpenConnectionAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        var row = await LockHold(conn, tx, holdId, studentId);
+
+        if (row.Status == "CONFIRMED")
+        {
+            await tx.CommitAsync();
+            return new HoldConfirmedDto(holdId, "CONFIRMED");
+        }
+        if (row.Status == "CANCELLED")
+            throw new ApiException(409, "HOLD_CANCELLED", "This application was cancelled, so it cannot be paid.");
+        if (row.Status == "EXPIRED" || row.Expired)
+        {
+            await Exec(conn, tx, "UPDATE holds SET status = 'EXPIRED' WHERE id = @id AND status = 'HELD'", ("id", holdId));
+            await tx.CommitAsync();
+            throw new ApiException(409, "HOLD_EXPIRED",
+                "This application has expired and the seat was released. Please apply again.");
+        }
+
+        // The seat was already counted while held, so confirming never changes the seat total.
+        await Exec(conn, tx,
+            "UPDATE holds SET status = 'CONFIRMED', confirmed_at = clock_timestamp() WHERE id = @id", ("id", holdId));
+        await tx.CommitAsync();
+        return new HoldConfirmedDto(holdId, "CONFIRMED");
+    }
+
+    /// <summary>Cancels a HELD application and frees the seat. Cancelling twice is harmless.</summary>
+    public async Task CancelHoldAsync(Guid holdId, string studentId)
+    {
+        await using var conn = await ds.OpenConnectionAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        var row = await LockHold(conn, tx, holdId, studentId);
+
+        if (row.Status == "CONFIRMED")
+            throw new ApiException(409, "ALREADY_CONFIRMED",
+                "This admission is already confirmed and cannot be cancelled here.");
+        if (row.Status == "HELD")
+        {
+            var next = row.Expired ? "EXPIRED" : "CANCELLED";
+            await Exec(conn, tx, "UPDATE holds SET status = @st WHERE id = @id", ("st", next), ("id", holdId));
+        }
+        await tx.CommitAsync();
+    }
 }
