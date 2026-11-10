@@ -15,5 +15,31 @@ services:
       timeout: 3s
       retries: 20
 
+  backend:
+    build:
+      context: ./backend
+      target: final
+    environment:
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=school;Username=school;Password=school"
+      HOLD_DURATION_SECONDS: "${HOLD_DURATION_SECONDS:-600}"
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Run with: docker compose --profile test run --rm backend-tests
+  backend-tests:
+    profiles: ["test"]
+    build:
+      context: ./backend
+      target: test
+    environment:
+      TEST_CONNECTION_STRING: "Host=db;Port=5432;Database=school_test;Username=school;Password=school"
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:
