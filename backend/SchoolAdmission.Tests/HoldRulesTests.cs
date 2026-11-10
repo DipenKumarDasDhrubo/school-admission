@@ -8,9 +8,9 @@ public class HoldRulesTests
 {
     private static async Task<(string ClassId, string HoldId)> ClassWithHold(HttpClient c, string student, int seats = 5)
     {
-        var cls = await Api.CreateClass(c, "Rules " + Guid.NewGuid().ToString("N")[..6], seats);
+        var cls = await Helpers.CreateClass(c, "Rules " + Guid.NewGuid().ToString("N")[..6], seats);
         var classId = cls.GetProperty("id").GetString()!;
-        var res = await Api.Apply(c, classId, student);
+        var res = await Helpers.Apply(c, classId, student);
         Assert.Equal(HttpStatusCode.Created, res.StatusCode);
         var hold = await res.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("HELD", hold.GetProperty("status").GetString());
@@ -22,14 +22,14 @@ public class HoldRulesTests
     {
         using var app = new TestApp();
         var c = app.CreateClient();
-        var student = Api.NewStudent();
+        var student = Helpers.NewStudent();
         var (classId, _) = await ClassWithHold(c, student);
 
-        Assert.Equal(HttpStatusCode.Conflict, (await Api.Apply(c, classId, student)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await Helpers.Apply(c, classId, student)).StatusCode);
 
-        var other = await Api.CreateClass(c, "Other class", 5);
+        var other = await Helpers.CreateClass(c, "Other class", 5);
         Assert.Equal(HttpStatusCode.Created,
-            (await Api.Apply(c, other.GetProperty("id").GetString()!, student)).StatusCode);
+            (await Helpers.Apply(c, other.GetProperty("id").GetString()!, student)).StatusCode);
     }
 
     [Fact]
@@ -37,15 +37,15 @@ public class HoldRulesTests
     {
         using var app = new TestApp(holdSeconds: 1);
         var c = app.CreateClient();
-        var student = Api.NewStudent();
+        var student = Helpers.NewStudent();
         var (classId, holdId) = await ClassWithHold(c, student, seats: 1);
 
         // The only seat is taken while the hold is active.
-        Assert.Equal(HttpStatusCode.Conflict, (await Api.Apply(c, classId, Api.NewStudent())).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await Helpers.Apply(c, classId, Helpers.NewStudent())).StatusCode);
 
         await Task.Delay(1600); // no API call needed for the seat to come back
 
-        var cls = await Api.GetClass(c, classId);
+        var cls = await Helpers.GetClass(c, classId);
         Assert.Equal(1, cls.GetProperty("availableSeats").GetInt32());
         Assert.Equal(0, cls.GetProperty("heldSeats").GetInt32());
 
@@ -53,10 +53,10 @@ public class HoldRulesTests
         Assert.Equal("EXPIRED", hold.GetProperty("status").GetString());
 
         Assert.Equal(HttpStatusCode.Conflict,
-            (await Api.Send(c, HttpMethod.Post, $"/holds/{holdId}/confirm", student)).StatusCode);
+            (await Helpers.Send(c, HttpMethod.Post, $"/holds/{holdId}/confirm", student)).StatusCode);
 
         // The same student can apply again once the old hold expired.
-        Assert.Equal(HttpStatusCode.Created, (await Api.Apply(c, classId, student)).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await Helpers.Apply(c, classId, student)).StatusCode);
     }
 
     [Fact]
@@ -64,17 +64,17 @@ public class HoldRulesTests
     {
         using var app = new TestApp();
         var c = app.CreateClient();
-        var student = Api.NewStudent();
+        var student = Helpers.NewStudent();
         var (classId, holdId) = await ClassWithHold(c, student);
 
         Assert.Equal(HttpStatusCode.Forbidden,
-            (await Api.Send(c, HttpMethod.Post, $"/holds/{holdId}/confirm", Api.NewStudent())).StatusCode);
+            (await Helpers.Send(c, HttpMethod.Post, $"/holds/{holdId}/confirm", Helpers.NewStudent())).StatusCode);
 
         var results = await Task.WhenAll(Enumerable.Range(0, 10).Select(_ =>
-            Api.Send(app.CreateClient(), HttpMethod.Post, $"/holds/{holdId}/confirm", student)));
+            Helpers.Send(app.CreateClient(), HttpMethod.Post, $"/holds/{holdId}/confirm", student)));
         Assert.All(results, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
 
-        var cls = await Api.GetClass(c, classId);
+        var cls = await Helpers.GetClass(c, classId);
         Assert.Equal(1, cls.GetProperty("confirmedSeats").GetInt32());
         Assert.Equal(0, cls.GetProperty("heldSeats").GetInt32());
 
@@ -87,16 +87,16 @@ public class HoldRulesTests
     {
         using var app = new TestApp();
         var c = app.CreateClient();
-        var student = Api.NewStudent();
+        var student = Helpers.NewStudent();
         var (classId, holdId) = await ClassWithHold(c, student);
 
-        var mine = await (await Api.Send(c, HttpMethod.Get, "/me/holds", student)).Content.ReadFromJsonAsync<JsonElement>();
+        var mine = await (await Helpers.Send(c, HttpMethod.Get, "/me/holds", student)).Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(1, mine.GetArrayLength());
         Assert.False(string.IsNullOrEmpty(mine[0].GetProperty("className").GetString()));
 
-        Assert.Equal(HttpStatusCode.NoContent, (await Api.Send(c, HttpMethod.Delete, $"/holds/{holdId}", student)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await Helpers.Send(c, HttpMethod.Delete, $"/holds/{holdId}", student)).StatusCode);
 
-        var cls = await Api.GetClass(c, classId);
+        var cls = await Helpers.GetClass(c, classId);
         Assert.Equal(0, cls.GetProperty("heldSeats").GetInt32());
         var hold = await c.GetFromJsonAsync<JsonElement>($"/holds/{holdId}");
         Assert.Equal("CANCELLED", hold.GetProperty("status").GetString());
@@ -108,16 +108,16 @@ public class HoldRulesTests
         using var app = new TestApp();
         var c = app.CreateClient();
 
-        var bad = await c.PostAsync("/classes", Api.Json(new { name = "", totalSeats = 0 }));
+        var bad = await c.PostAsync("/classes", Helpers.Json(new { name = "", totalSeats = 0 }));
         Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
         var body = await bad.Content.ReadFromJsonAsync<JsonElement>();
         Assert.False(string.IsNullOrWhiteSpace(body.GetProperty("message").GetString()));
 
-        var cls = await Api.CreateClass(c, "Validation", 3);
+        var cls = await Helpers.CreateClass(c, "Validation", 3);
         var classId = cls.GetProperty("id").GetString()!;
-        Assert.Equal(HttpStatusCode.BadRequest, (await Api.Apply(c, classId, "123")).StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, (await Api.Apply(c, classId, null!)).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await Api.Apply(c, Guid.NewGuid().ToString(), Api.NewStudent())).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Helpers.Apply(c, classId, "123")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Helpers.Apply(c, classId, null!)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await Helpers.Apply(c, Guid.NewGuid().ToString(), Helpers.NewStudent())).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await c.GetAsync($"/holds/{Guid.NewGuid()}")).StatusCode);
     }
 
@@ -126,10 +126,10 @@ public class HoldRulesTests
     {
         using var app = new TestApp();
         var c = app.CreateClient();
-        var student = Api.NewStudent();
+        var student = Helpers.NewStudent();
         var (classId, holdId) = await ClassWithHold(c, student);
 
-        var cls = await Api.GetClass(c, classId);
+        var cls = await Helpers.GetClass(c, classId);
         foreach (var f in new[] { "id", "name", "totalSeats", "heldSeats", "confirmedSeats", "availableSeats" })
             Assert.True(cls.TryGetProperty(f, out _), $"class is missing {f}");
 

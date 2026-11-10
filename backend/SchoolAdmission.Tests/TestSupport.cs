@@ -61,7 +61,7 @@ public sealed class TestApp : WebApplicationFactory<Program>
     }
 }
 
-public static class Api
+public static class Helpers
 {
     private static int _studentCounter = Random.Shared.Next(0, 1_000_000);
 
