@@ -106,4 +106,61 @@ public sealed class Store(NpgsqlDataSource ds, IConfiguration config, ILogger<St
         if (!await r.ReadAsync()) throw new ApiException(404, "CLASS_NOT_FOUND", "This class does not exist.");
         return ReadClass(r);
     }
+
+    // ---------- holds ----------
+
+    /// <summary>
+    /// Creates a seat hold. The class row is locked (FOR UPDATE) for the whole transaction, so all hold
+    /// attempts on one class are serialized by PostgreSQL itself. This is what keeps
+    /// held + confirmed &lt;= totalSeats across any number of concurrent requests and backend processes.
+    /// All time comparisons use the database clock.
+    /// </summary>
+    public async Task<HoldCreatedDto> CreateHoldAsync(Guid classId, string studentId)
+    {
+        await using var conn = await ds.OpenConnectionAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var totalObj = await Scalar(conn, tx, "SELECT total_seats FROM classes WHERE id = @id FOR UPDATE",
+                ("id", classId));
+            if (totalObj is null) throw new ApiException(404, "CLASS_NOT_FOUND", "This class does not exist.");
+            var total = (int)totalObj;
+
+            // Flip expired holds of this class to EXPIRED so the unique index never blocks a re-apply.
+            await Exec(conn, tx, """
+                UPDATE holds SET status = 'EXPIRED'
+                WHERE class_id = @id AND status = 'HELD' AND expires_at <= clock_timestamp()
+                """, ("id", classId));
+
+            var existing = await Scalar(conn, tx, """
+                SELECT 1 FROM holds
+                WHERE class_id = @id AND student_id = @s AND status IN ('HELD','CONFIRMED') LIMIT 1
+                """, ("id", classId), ("s", studentId));
+            if (existing is not null)
+                throw new ApiException(409, "ALREADY_APPLIED",
+                    "You already have an active application or confirmed admission in this class.");
+
+            var used = (long)(await Scalar(conn, tx,
+                "SELECT count(*) FROM holds WHERE class_id = @id AND status IN ('HELD','CONFIRMED')",
+                ("id", classId)))!;
+            if (used >= total)
+                throw new ApiException(409, "NO_SEATS", "Sorry, there are no seats left in this class.");
+
+            var holdId = Guid.NewGuid();
+            await using var ins = Cmd(conn, tx, """
+                INSERT INTO holds (id, class_id, student_id, status, expires_at)
+                VALUES (@h, @c, @s, 'HELD', clock_timestamp() + @d * interval '1 second')
+                RETURNING expires_at
+                """, ("h", holdId), ("c", classId), ("s", studentId), ("d", HoldDurationSeconds));
+            var expiresAt = (DateTime)(await ins.ExecuteScalarAsync())!;
+
+            await tx.CommitAsync();
+            return new HoldCreatedDto(holdId, classId, studentId, "HELD", expiresAt);
+        }
+        catch (PostgresException e) when (e.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            throw new ApiException(409, "ALREADY_APPLIED",
+                "You already have an active application or confirmed admission in this class.");
+        }
+    }
 }

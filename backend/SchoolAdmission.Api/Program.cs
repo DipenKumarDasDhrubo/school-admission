@@ -78,6 +78,23 @@ app.MapGet("/classes", async (Store store) => Results.Ok(await store.ListClasses
 app.MapGet("/classes/{classId:guid}", async (Guid classId, Store store) =>
     Results.Ok(await store.GetClassAsync(classId)));
 
+// ---------- holds ----------
+
+static string RequireStudent(HttpRequest req)
+{
+    var id = req.Headers["X-Student-Id"].ToString().Trim();
+    if (!Regex.IsMatch(id, @"^[0-9]{17}$"))
+        throw new ApiException(400, "INVALID_STUDENT_ID",
+            "Please enter a valid 17-digit birth registration number.");
+    return id;
+}
+
+app.MapPost("/classes/{classId:guid}/holds", async (Guid classId, HttpRequest req, Store store) =>
+{
+    var hold = await store.CreateHoldAsync(classId, RequireStudent(req));
+    return Results.Created($"/holds/{hold.HoldId}", hold);
+});
+
 app.Run();
 
 public partial class Program { }
