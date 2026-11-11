@@ -66,7 +66,7 @@ describe('ClassesPanel', () => {
   });
 
   it('asks for the registration number instead of calling the server when it is missing', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse([cls()]));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse([cls()]));
     vi.stubGlobal('fetch', fetchMock);
     render(<ClassesPanel studentId="" refreshKey={0} onApplied={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Apply' }));
